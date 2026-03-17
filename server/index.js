@@ -123,6 +123,7 @@ function getRoomState(room) {
 
   if (room.game) {
     state.game = {
+      mode: room.game.mode || 'classic',
       phase: room.game.phase,
       offenseTeamIdx: room.game.offenseTeamIdx,
       round: room.game.round,
@@ -153,10 +154,12 @@ function getPlayerRole(room, sessionId) {
 
 // ==================== SOCKET HANDLERS ====================
 io.on('connection', (socket) => {
+  console.log(`[connect] socket=${socket.id}`);
   let mySessionId = null;
   let myRoomCode = null;
 
   socket.on('create-room', ({ playerName, sessionId }) => {
+    console.log(`[create-room] player=${playerName} session=${sessionId}`);
     const room = createRoom(socket.id, playerName, sessionId);
     if (!room) {
       socket.emit('error-msg', { message: 'Could not create room, try again.' });
@@ -165,6 +168,7 @@ io.on('connection', (socket) => {
     mySessionId = sessionId;
     myRoomCode = room.code;
     socket.join(room.code);
+    console.log(`[create-room] created room=${room.code}, total rooms=${rooms.size}`);
     socket.emit('room-created', { roomCode: room.code });
     io.to(room.code).emit('room-state', getRoomState(room));
   });
@@ -172,6 +176,7 @@ io.on('connection', (socket) => {
   socket.on('join-room', ({ roomCode, playerName, sessionId }) => {
     const code = roomCode.toUpperCase().trim();
     const room = rooms.get(code);
+    console.log(`[join-room] player=${playerName} code=${code} found=${!!room} allRooms=[${[...rooms.keys()].join(',')}]`);
     if (!room) {
       socket.emit('error-msg', { message: 'Room not found.' });
       return;
@@ -286,7 +291,7 @@ io.on('connection', (socket) => {
     io.to(myRoomCode).emit('room-state', getRoomState(room));
   });
 
-  socket.on('start-game', ({ customCards } = {}) => {
+  socket.on('start-game', ({ customCards, gameMode } = {}) => {
     if (!myRoomCode || !mySessionId) return;
     const room = rooms.get(myRoomCode);
     if (!room || room.hostId !== mySessionId) return;
@@ -309,24 +314,41 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // Build rotation order per team (masters first, then players)
+    const team0Roster = [];
+    const team1Roster = [];
+    for (const [sid, p] of room.players) {
+      if (p.teamIndex === 0) team0Roster.push(sid);
+      if (p.teamIndex === 1) team1Roster.push(sid);
+    }
+    // Put current master first in the rotation
+    team0Roster.sort((a, b) => (room.players.get(b).isMaster ? 1 : 0) - (room.players.get(a).isMaster ? 1 : 0));
+    team1Roster.sort((a, b) => (room.players.get(b).isMaster ? 1 : 0) - (room.players.get(a).isMaster ? 1 : 0));
+
+    const mode = gameMode === 'freeplay' ? 'freeplay' : 'classic';
+
     // Initialize game
     room.game = {
+      mode,
       phase: 'master-peek',
       cards: shuffle(customCards && customCards.length >= 3 ? customCards : spectrumCards),
       cardIndex: 0,
       targetAngle: randomTarget(),
-      offenseTeamIdx: 0,
+      offenseTeamIdx: 0, // In freeplay, this is the "master team" for this round
       offenseAngle: 90,
       defenseAngle: 90,
       clue: '',
       scores: [0, 0],
       round: 1,
       revealResult: null,
+      masterRotation: [team0Roster, team1Roster],
+      masterIndex: [0, 0],
+      dialController: null,
     };
 
     io.to(myRoomCode).emit('room-state', getRoomState(room));
 
-    // Send target to offense master only
+    // Send target to the master of the current team
     sendTargetToMaster(room);
   });
 
@@ -345,16 +367,44 @@ io.on('connection', (socket) => {
     io.to(myRoomCode).emit('room-state', getRoomState(room));
   });
 
+  socket.on('grab-dial', () => {
+    if (!myRoomCode || !mySessionId) return;
+    const room = rooms.get(myRoomCode);
+    if (!room || !room.game) return;
+    const role = getPlayerRole(room, mySessionId);
+    const phase = room.game.phase;
+    // Only allow the correct team's non-master players to grab
+    if ((phase === 'offense-guess' && role === 'offense-player') ||
+        (phase === 'defense-guess' && role === 'defense-player')) {
+      if (!room.game.dialController || room.game.dialController === mySessionId) {
+        room.game.dialController = mySessionId;
+        const controllerName = room.players.get(mySessionId)?.name || '';
+        io.to(myRoomCode).emit('dial-controller', { sessionId: mySessionId, name: controllerName });
+      }
+    }
+  });
+
+  socket.on('release-dial', () => {
+    if (!myRoomCode || !mySessionId) return;
+    const room = rooms.get(myRoomCode);
+    if (!room || !room.game) return;
+    if (room.game.dialController === mySessionId) {
+      room.game.dialController = null;
+      io.to(myRoomCode).emit('dial-controller', { sessionId: null, name: null });
+    }
+  });
+
   socket.on('update-needle', ({ angle }) => {
     if (!myRoomCode || !mySessionId) return;
     const room = rooms.get(myRoomCode);
     if (!room || !room.game) return;
 
     const role = getPlayerRole(room, mySessionId);
-    // Only non-master players can move the needle
+    // Only the current dial controller can move the needle
+    if (room.game.dialController !== mySessionId) return;
+
     if (room.game.phase === 'offense-guess' && role === 'offense-player') {
       room.game.offenseAngle = angle;
-      // Broadcast to entire room (including sender for confirmation)
       io.to(myRoomCode).emit('needle-update', { team: 'offense', angle });
     } else if (room.game.phase === 'defense-guess' && role === 'defense-player') {
       room.game.defenseAngle = angle;
@@ -373,6 +423,8 @@ io.on('connection', (socket) => {
     if (room.game.phase === 'offense-guess' && role === 'offense-player') {
       room.game.offenseAngle = angle;
       room.game.phase = 'defense-guess';
+      room.game.dialController = null;
+      io.to(myRoomCode).emit('dial-controller', { sessionId: null, name: null });
       io.to(myRoomCode).emit('room-state', getRoomState(room));
     } else if (room.game.phase === 'defense-guess' && role === 'defense-player') {
       room.game.defenseAngle = angle;
@@ -382,22 +434,66 @@ io.on('connection', (socket) => {
       const defDiff = Math.abs(room.game.defenseAngle - room.game.targetAngle);
       const offenseCloser = offDiff < defDiff;
       const tied = Math.abs(offDiff - defDiff) < 0.01;
-      const points = offenseCloser ? getPoints(offDiff) : 0;
 
-      if (offenseCloser) {
-        room.game.scores[room.game.offenseTeamIdx] += points;
+      const offenseTeamIdx = room.game.offenseTeamIdx;
+      const defenseTeamIdx = offenseTeamIdx === 0 ? 1 : 0;
+
+      if (room.game.mode === 'freeplay') {
+        // Points based on difference between teams — closer team scores more
+        const gap = Math.abs(offDiff - defDiff);
+        let closerPoints, fartherPoints;
+        if (tied) {
+          closerPoints = 1;
+          fartherPoints = 1;
+        } else if (gap <= 5) {
+          closerPoints = 2;
+          fartherPoints = 1;
+        } else if (gap <= 15) {
+          closerPoints = 3;
+          fartherPoints = 1;
+        } else if (gap <= 30) {
+          closerPoints = 4;
+          fartherPoints = 0;
+        } else {
+          closerPoints = 4;
+          fartherPoints = 0;
+        }
+        const offPoints = offenseCloser ? closerPoints : (tied ? 1 : fartherPoints);
+        const defPoints = offenseCloser ? fartherPoints : (tied ? 1 : closerPoints);
+        room.game.scores[offenseTeamIdx] += offPoints;
+        room.game.scores[defenseTeamIdx] += defPoints;
+
+        room.game.revealResult = {
+          targetAngle: room.game.targetAngle,
+          offenseAngle: room.game.offenseAngle,
+          defenseAngle: room.game.defenseAngle,
+          offDiff: Math.round(offDiff * 10) / 10,
+          defDiff: Math.round(defDiff * 10) / 10,
+          offenseCloser,
+          tied,
+          points: offPoints,
+          offPoints,
+          defPoints,
+          freeplay: true,
+        };
+      } else {
+        // Classic mode: offense scores only if closer
+        const points = offenseCloser ? getPoints(offDiff) : 0;
+        if (offenseCloser) {
+          room.game.scores[offenseTeamIdx] += points;
+        }
+
+        room.game.revealResult = {
+          targetAngle: room.game.targetAngle,
+          offenseAngle: room.game.offenseAngle,
+          defenseAngle: room.game.defenseAngle,
+          offDiff: Math.round(offDiff * 10) / 10,
+          defDiff: Math.round(defDiff * 10) / 10,
+          offenseCloser,
+          tied,
+          points,
+        };
       }
-
-      room.game.revealResult = {
-        targetAngle: room.game.targetAngle,
-        offenseAngle: room.game.offenseAngle,
-        defenseAngle: room.game.defenseAngle,
-        offDiff: Math.round(offDiff * 10) / 10,
-        defDiff: Math.round(defDiff * 10) / 10,
-        offenseCloser,
-        tied,
-        points,
-      };
 
       const POINTS_TO_WIN = 10;
       if (room.game.scores[0] >= POINTS_TO_WIN || room.game.scores[1] >= POINTS_TO_WIN) {
@@ -424,8 +520,28 @@ io.on('connection', (socket) => {
     room.game.offenseTeamIdx = room.game.offenseTeamIdx === 0 ? 1 : 0;
     room.game.phase = 'master-peek';
     room.game.clue = '';
+    room.game.dialController = null;
     room.game.round++;
     room.game.revealResult = null;
+
+    // Rotate masters on both teams
+    for (let t = 0; t < 2; t++) {
+      const roster = room.game.masterRotation[t];
+      if (roster.length > 0) {
+        // Unset old master
+        const oldMasterSid = roster[room.game.masterIndex[t]];
+        const oldMaster = room.players.get(oldMasterSid);
+        if (oldMaster) oldMaster.isMaster = false;
+
+        // Advance to next player (wrap around)
+        room.game.masterIndex[t] = (room.game.masterIndex[t] + 1) % roster.length;
+
+        // Set new master
+        const newMasterSid = roster[room.game.masterIndex[t]];
+        const newMaster = room.players.get(newMasterSid);
+        if (newMaster) newMaster.isMaster = true;
+      }
+    }
 
     io.to(myRoomCode).emit('room-state', getRoomState(room));
     sendTargetToMaster(room);

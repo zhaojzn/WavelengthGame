@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect, createContext, useContext } f
 import { io } from 'socket.io-client';
 import defaultCards from './spectrumCards';
 
-const APP_VERSION = 'v1.0.1';
+const APP_VERSION = 'v1.2.0';
 const POINTS_TO_WIN = 10;
 
 const DEFAULT_PRESETS_TEXT = defaultCards.map(([l, r]) => `${l} / ${r}`).join('\n');
@@ -56,6 +56,7 @@ function useSocket() {
   const [targetAngle, setTargetAngle] = useState(null);
   const [error, setError] = useState(null);
   const [roomCode, setRoomCode] = useState(null);
+  const [dialController, setDialController] = useState(null);
   const sessionId = useRef(getSessionId()).current;
 
   useEffect(() => {
@@ -78,6 +79,9 @@ function useSocket() {
       setRoomCode(null);
       setTargetAngle(null);
       setError('You were kicked from the room.');
+    });
+    s.on('dial-controller', ({ sessionId, name }) => {
+      setDialController(sessionId ? { sessionId, name } : null);
     });
     s.on('needle-update', ({ team, angle }) => {
       setRoomState(prev => {
@@ -127,8 +131,8 @@ function useSocket() {
     socket?.emit('update-team-name', { teamIndex, name });
   }, [socket]);
 
-  const startGame = useCallback((customCards) => {
-    socket?.emit('start-game', { customCards });
+  const startGame = useCallback((customCards, gameMode) => {
+    socket?.emit('start-game', { customCards, gameMode });
   }, [socket]);
 
   const submitClue = useCallback((clue) => {
@@ -137,6 +141,18 @@ function useSocket() {
 
   const updateNeedle = useCallback((angle) => {
     socket?.emit('update-needle', { angle });
+  }, [socket]);
+
+  const requestSync = useCallback(() => {
+    socket?.emit('request-sync');
+  }, [socket]);
+
+  const grabDial = useCallback(() => {
+    socket?.emit('grab-dial');
+  }, [socket]);
+
+  const releaseDial = useCallback(() => {
+    socket?.emit('release-dial');
   }, [socket]);
 
   const lockGuess = useCallback((angle) => {
@@ -167,8 +183,10 @@ function useSocket() {
 
   return {
     connected, roomState, targetAngle, error, roomCode, sessionId, myRole, isHost,
+    dialController,
     createRoom, joinRoom, joinTeam, leaveTeam, kickPlayer, updateTeamName,
     startGame, submitClue, updateNeedle, lockGuess, nextRound, playAgain,
+    grabDial, releaseDial, requestSync,
   };
 }
 
@@ -330,6 +348,7 @@ function LobbyScreen({ state, sessionId, isHost, error, onJoinTeam, onLeaveTeam,
   const [copied, setCopied] = useState(false);
   const [presetsText, setPresetsText] = useState(loadSavedPresets);
   const [showPresets, setShowPresets] = useState(false);
+  const [gameMode, setGameMode] = useState('classic'); // 'classic' or 'freeplay'
   const parsedCards = parsePresetsText(presetsText);
 
   const handlePresetsChange = (text) => {
@@ -477,27 +496,79 @@ function LobbyScreen({ state, sessionId, isHost, error, onJoinTeam, onLeaveTeam,
           </div>
         )}
 
+        {/* Game Mode Selector */}
+        {isHost && (
+          <div className="glass rounded-xl p-4 mb-6">
+            <h3 className="text-sm font-semibold text-gray-300 mb-3 text-center uppercase tracking-wider">Game Mode</h3>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setGameMode('classic')}
+                className={`flex-1 py-3 px-4 rounded-xl text-sm font-semibold transition-all border ${
+                  gameMode === 'classic'
+                    ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                    : 'bg-white/5 text-gray-400 border-white/10 hover:bg-white/10'
+                }`}
+              >
+                <div className="font-bold mb-0.5">Classic</div>
+                <div className="text-[10px] opacity-70">Offense vs Defense</div>
+              </button>
+              <button
+                onClick={() => setGameMode('freeplay')}
+                className={`flex-1 py-3 px-4 rounded-xl text-sm font-semibold transition-all border ${
+                  gameMode === 'freeplay'
+                    ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                    : 'bg-white/5 text-gray-400 border-white/10 hover:bg-white/10'
+                }`}
+              >
+                <div className="font-bold mb-0.5">Free Play</div>
+                <div className="text-[10px] opacity-70">Both teams score</div>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* How it works */}
         <div className="glass rounded-xl p-4 mb-6">
           <h3 className="text-sm font-semibold text-gray-300 mb-3 text-center uppercase tracking-wider">How it Works</h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center text-xs text-gray-400">
-            <div className="flex flex-col items-center gap-1">
-              <div className="w-8 h-8 rounded-full bg-yellow-500/15 border border-yellow-500/30 flex items-center justify-center text-yellow-400 text-sm font-bold">1</div>
-              <span>Master sees target & gives a clue</span>
+          {gameMode === 'classic' ? (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center text-xs text-gray-400">
+              <div className="flex flex-col items-center gap-1">
+                <div className="w-8 h-8 rounded-full bg-yellow-500/15 border border-yellow-500/30 flex items-center justify-center text-yellow-400 text-sm font-bold">1</div>
+                <span>Master sees target & gives a clue</span>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <div className="w-8 h-8 rounded-full bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400 text-sm font-bold">2</div>
+                <span>Offense team guesses on the dial</span>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <div className="w-8 h-8 rounded-full bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-purple-400 text-sm font-bold">3</div>
+                <span>Defense team tries to block</span>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <div className="w-8 h-8 rounded-full bg-green-500/15 border border-green-500/30 flex items-center justify-center text-green-400 text-sm font-bold">4</div>
+                <span>Offense scores only if closer!</span>
+              </div>
             </div>
-            <div className="flex flex-col items-center gap-1">
-              <div className="w-8 h-8 rounded-full bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400 text-sm font-bold">2</div>
-              <span>Offense team guesses on the dial</span>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center text-xs text-gray-400">
+              <div className="flex flex-col items-center gap-1">
+                <div className="w-8 h-8 rounded-full bg-yellow-500/15 border border-yellow-500/30 flex items-center justify-center text-yellow-400 text-sm font-bold">1</div>
+                <span>Master sees target & gives a clue</span>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <div className="w-8 h-8 rounded-full bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400 text-sm font-bold">2</div>
+                <span>Team A guesses on the dial</span>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <div className="w-8 h-8 rounded-full bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-purple-400 text-sm font-bold">3</div>
+                <span>Team B guesses on the dial</span>
+              </div>
+              <div className="flex flex-col items-center gap-1">
+                <div className="w-8 h-8 rounded-full bg-green-500/15 border border-green-500/30 flex items-center justify-center text-green-400 text-sm font-bold">4</div>
+                <span>Both teams score by accuracy!</span>
+              </div>
             </div>
-            <div className="flex flex-col items-center gap-1">
-              <div className="w-8 h-8 rounded-full bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-purple-400 text-sm font-bold">3</div>
-              <span>Defense team tries to block</span>
-            </div>
-            <div className="flex flex-col items-center gap-1">
-              <div className="w-8 h-8 rounded-full bg-green-500/15 border border-green-500/30 flex items-center justify-center text-green-400 text-sm font-bold">4</div>
-              <span>Offense scores only if closer!</span>
-            </div>
-          </div>
+          )}
         </div>
 
         {/* Spectrum Presets Editor (host only) */}
@@ -550,7 +621,7 @@ function LobbyScreen({ state, sessionId, isHost, error, onJoinTeam, onLeaveTeam,
         {/* Start Button (host only) */}
         {isHost && (
           <button
-            onClick={() => onStartGame(parsedCards.length >= 3 ? parsedCards : null)}
+            onClick={() => onStartGame(parsedCards.length >= 3 ? parsedCards : null, gameMode)}
             disabled={!canStart || parsedCards.length < 3}
             className="btn-primary w-full px-8 py-4 rounded-2xl text-lg font-semibold text-white relative disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -571,7 +642,7 @@ function LobbyScreen({ state, sessionId, isHost, error, onJoinTeam, onLeaveTeam,
 // ==================== DIAL COMPONENT ====================
 function Dial({
   offenseAngle, defenseAngle, targetAngle,
-  revealed, onNeedleChange, interactive,
+  revealed, onNeedleChange, onNeedleRelease, interactive,
   leftLabel, rightLabel, masterView,
   showOffenseNeedle, showDefenseNeedle,
   offenseColor, defenseColor,
@@ -587,7 +658,7 @@ function Dial({
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
     const dx = clientX - centerX;
-    const dy = centerY - clientY;
+    const dy = Math.max(1, centerY - clientY); // Clamp so dragging below center doesn't invert
     let angle = Math.atan2(dy, dx) * (180 / Math.PI);
     angle = Math.max(5, Math.min(175, angle));
     return angle;
@@ -607,7 +678,12 @@ function Dial({
     if (angle !== null) onNeedleChange(angle);
   }, [interactive, getAngleFromEvent, onNeedleChange]);
 
-  const handlePointerUp = useCallback(() => { isDragging.current = false; }, []);
+  const handlePointerUp = useCallback(() => {
+    if (isDragging.current) {
+      isDragging.current = false;
+      if (onNeedleRelease) onNeedleRelease();
+    }
+  }, [onNeedleRelease]);
 
   useEffect(() => {
     window.addEventListener('mousemove', handlePointerMove);
@@ -719,8 +795,9 @@ function Dial({
 }
 
 // ==================== GAME SCREEN ====================
-function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClue, onUpdateNeedle, onLockGuess, onNextRound }) {
+function GameScreen({ state, myRole, targetAngle, isHost, sessionId, dialController, onSubmitClue, onUpdateNeedle, onLockGuess, onNextRound, onGrabDial, onReleaseDial }) {
   const game = state.game;
+  const isFreeplay = game.mode === 'freeplay';
   const [localAngle, setLocalAngle] = useState(90);
   const [clue, setClue] = useState('');
   const [showParticles, setShowParticles] = useState(false);
@@ -743,8 +820,9 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
   const team1Players = state.players.filter(p => p.teamIndex === 1 && !p.isMaster).map(p => p.name);
 
   // Can I interact with the dial?
-  const canDrag = (game.phase === 'offense-guess' && myRole === 'offense-player') ||
-                  (game.phase === 'defense-guess' && myRole === 'defense-player');
+  const isMyTurn = (game.phase === 'offense-guess' && myRole === 'offense-player') ||
+                   (game.phase === 'defense-guess' && myRole === 'defense-player');
+  const canDrag = isMyTurn && (!dialController || dialController.sessionId === sessionId);
 
   // Show master view of target
   const showMasterView = myRole === 'offense-master' && targetAngle != null && game.phase !== 'reveal' && game.phase !== 'game-over';
@@ -756,14 +834,18 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
   const currentOffAngle = canDrag && game.phase === 'offense-guess' ? localAngle : game.offenseAngle;
   const currentDefAngle = canDrag && game.phase === 'defense-guess' ? localAngle : game.defenseAngle;
 
-  // Reset local angle when phase changes
+  // Reset local angle and grab state when phase changes
   useEffect(() => {
     setLocalAngle(90);
+    hasGrabbed.current = false;
   }, [game.phase]);
 
   // Show particles on reveal
   useEffect(() => {
-    if (game.phase === 'reveal' && game.revealResult?.offenseCloser && game.revealResult?.points >= 3) {
+    if (game.phase === 'reveal' && game.revealResult && (
+      (game.revealResult.offenseCloser && game.revealResult.points >= 3) ||
+      (game.revealResult.freeplay && (game.revealResult.offPoints >= 3 || game.revealResult.defPoints >= 3))
+    )) {
       setShowParticles(true);
       const t = setTimeout(() => setShowParticles(false), 3000);
       return () => clearTimeout(t);
@@ -771,7 +853,12 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
   }, [game.phase, game.revealResult]);
 
   const latestAngle = useRef(90);
+  const hasGrabbed = useRef(false);
   const handleNeedleChange = (angle) => {
+    if (!hasGrabbed.current) {
+      onGrabDial();
+      hasGrabbed.current = true;
+    }
     setLocalAngle(angle);
     latestAngle.current = angle;
     // Throttle network updates — always send latest angle when throttle fires
@@ -780,6 +867,19 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
         onUpdateNeedle(latestAngle.current);
         throttle.current = null;
       }, 50);
+    }
+  };
+
+  const handleNeedleRelease = () => {
+    if (hasGrabbed.current) {
+      // Send final angle immediately
+      onUpdateNeedle(latestAngle.current);
+      onReleaseDial();
+      hasGrabbed.current = false;
+      if (throttle.current) {
+        clearTimeout(throttle.current);
+        throttle.current = null;
+      }
     }
   };
 
@@ -808,8 +908,9 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
             <div>
               <div className="text-sm font-semibold text-blue-400 flex items-center gap-2">
                 {state.teamNames[0]}
-                {offenseTeamIdx === 0 && <span className="text-[10px] bg-blue-500/20 text-blue-300 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">OFF</span>}
-                {defenseTeamIdx === 0 && <span className="text-[10px] bg-gray-500/20 text-gray-400 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">DEF</span>}
+                {isFreeplay && offenseTeamIdx === 0 && <span className="text-[10px] bg-yellow-500/20 text-yellow-300 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">CLUE</span>}
+                {!isFreeplay && offenseTeamIdx === 0 && <span className="text-[10px] bg-blue-500/20 text-blue-300 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">OFF</span>}
+                {!isFreeplay && defenseTeamIdx === 0 && <span className="text-[10px] bg-gray-500/20 text-gray-400 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">DEF</span>}
               </div>
               <div className="flex items-center gap-1 mt-0.5">
                 <div className="h-1.5 bg-gray-700 rounded-full w-24 overflow-hidden">
@@ -826,8 +927,9 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
           <div className="flex items-center gap-3 flex-1 justify-end">
             <div className="text-right">
               <div className="text-sm font-semibold text-purple-400 flex items-center justify-end gap-2">
-                {offenseTeamIdx === 1 && <span className="text-[10px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">OFF</span>}
-                {defenseTeamIdx === 1 && <span className="text-[10px] bg-gray-500/20 text-gray-400 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">DEF</span>}
+                {isFreeplay && offenseTeamIdx === 1 && <span className="text-[10px] bg-yellow-500/20 text-yellow-300 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">CLUE</span>}
+                {!isFreeplay && offenseTeamIdx === 1 && <span className="text-[10px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">OFF</span>}
+                {!isFreeplay && defenseTeamIdx === 1 && <span className="text-[10px] bg-gray-500/20 text-gray-400 px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">DEF</span>}
                 {state.teamNames[1]}
               </div>
               <div className="flex items-center gap-1 mt-0.5 justify-end">
@@ -873,7 +975,7 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
         <span className={`text-xs uppercase tracking-widest font-semibold px-3 py-1 rounded-full ${
           offenseTeamIdx === 0 ? 'bg-blue-500/15 text-blue-400 border border-blue-500/20' : 'bg-purple-500/15 text-purple-400 border border-purple-500/20'
         }`}>
-          {state.teamNames[offenseTeamIdx]} on Offense
+          {isFreeplay ? `${state.teamNames[offenseTeamIdx]}'s Master` : `${state.teamNames[offenseTeamIdx]} on Offense`}
         </span>
         <span className="text-xs uppercase tracking-widest font-medium px-3 py-1 rounded-full bg-white/5 text-gray-400 border border-white/10">
           You: {myRole?.replace('-', ' ') || 'spectator'}
@@ -889,6 +991,7 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
           revealed={game.phase === 'reveal' || game.phase === 'game-over'}
           masterView={showMasterView}
           onNeedleChange={handleNeedleChange}
+          onNeedleRelease={handleNeedleRelease}
           interactive={canDrag}
           leftLabel={game.card[0]}
           rightLabel={game.card[1]}
@@ -957,7 +1060,11 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
                 <div className="text-2xl font-bold text-white mb-3">"{game.clue}"</div>
                 {myRole === 'offense-player' ? (
                   <>
-                    <p className="text-sm text-gray-400 mb-4">Drag the needle to your guess!</p>
+                    {dialController && dialController.sessionId !== sessionId ? (
+                      <p className="text-sm text-yellow-400 mb-4">{dialController.name} is moving the dial...</p>
+                    ) : (
+                      <p className="text-sm text-gray-400 mb-4">Drag the needle to your guess!</p>
+                    )}
                     <button onClick={handleLock}
                       className="btn-primary px-8 py-3 rounded-xl font-semibold text-white relative">
                       <span className="relative z-10 flex items-center gap-2">
@@ -994,22 +1101,26 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
                 <div className="text-2xl font-bold text-white mb-3">"{game.clue}"</div>
                 {myRole === 'defense-player' ? (
                   <>
-                    <p className="text-sm text-gray-400 mb-4">Try to get closer to the target than offense!</p>
+                    {dialController && dialController.sessionId !== sessionId ? (
+                      <p className="text-sm text-yellow-400 mb-4">{dialController.name} is moving the dial...</p>
+                    ) : (
+                      <p className="text-sm text-gray-400 mb-4">{isFreeplay ? 'Drag the needle to your guess!' : 'Try to get closer to the target than offense!'}</p>
+                    )}
                     <button onClick={handleLock}
                       className="btn-primary px-8 py-3 rounded-xl font-semibold text-white relative">
                       <span className="relative z-10 flex items-center gap-2">
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
-                        Lock In Defense
+                        Lock In Guess
                       </span>
                     </button>
                   </>
                 ) : myRole === 'defense-master' ? (
                   <div className="text-sm text-gray-400">
-                    <p>Your team is defending — watch them block!</p>
+                    <p>{isFreeplay ? 'Your team is guessing — watch and hope!' : 'Your team is defending — watch them block!'}</p>
                   </div>
                 ) : (
                   <div className="text-sm text-gray-400">
-                    <p>{state.teamNames[defenseTeamIdx]} is defending...</p>
+                    <p>{state.teamNames[defenseTeamIdx]} is {isFreeplay ? 'guessing' : 'defending'}...</p>
                     <div className="mt-3 flex justify-center">
                       <div className="flex gap-1">
                         <div className="w-2 h-2 rounded-full bg-purple-400/60 animate-bounce" style={{ animationDelay: '0s' }} />
@@ -1027,7 +1138,23 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
           {(game.phase === 'reveal' || game.phase === 'game-over') && game.revealResult && (
             <div className="text-center animate-fade-in-up">
               <div className="glass rounded-2xl p-6 max-w-md mx-auto">
-                {game.revealResult.offenseCloser ? (
+                {isFreeplay ? (
+                  <>
+                    <div className="text-3xl font-bold text-white mb-3">Results!</div>
+                    <div className="flex justify-center gap-4 mb-2">
+                      <div className={`rounded-xl px-5 py-3 ${offenseTeamIdx === 0 ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-purple-500/10 border border-purple-500/20'}`}>
+                        <div className={`text-xs ${offenseTeamIdx === 0 ? 'text-blue-400' : 'text-purple-400'}`}>{state.teamNames[offenseTeamIdx]}</div>
+                        <div className={`text-lg font-bold ${offenseTeamIdx === 0 ? 'text-blue-400' : 'text-purple-400'}`}>{game.revealResult.offDiff.toFixed(1)}° off</div>
+                        <div className="text-2xl font-bold text-green-400">+{game.revealResult.offPoints}</div>
+                      </div>
+                      <div className={`rounded-xl px-5 py-3 ${defenseTeamIdx === 0 ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-purple-500/10 border border-purple-500/20'}`}>
+                        <div className={`text-xs ${defenseTeamIdx === 0 ? 'text-blue-400' : 'text-purple-400'}`}>{state.teamNames[defenseTeamIdx]}</div>
+                        <div className={`text-lg font-bold ${defenseTeamIdx === 0 ? 'text-blue-400' : 'text-purple-400'}`}>{game.revealResult.defDiff.toFixed(1)}° off</div>
+                        <div className="text-2xl font-bold text-green-400">+{game.revealResult.defPoints}</div>
+                      </div>
+                    </div>
+                  </>
+                ) : game.revealResult.offenseCloser ? (
                   <>
                     <div className="text-4xl font-bold text-green-400 mb-1">{getPointsLabel(game.revealResult.points)}</div>
                     <div className="text-sm text-gray-400 mb-2">{state.teamNames[offenseTeamIdx]} was closer!</div>
@@ -1049,16 +1176,18 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
                   </>
                 )}
 
-                <div className="mt-4 flex justify-center gap-4">
-                  <div className={`rounded-xl px-4 py-2 ${offenseTeamIdx === 0 ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-purple-500/10 border border-purple-500/20'}`}>
-                    <div className="text-xs text-gray-400">Offense</div>
-                    <div className={`text-lg font-bold ${offenseTeamIdx === 0 ? 'text-blue-400' : 'text-purple-400'}`}>{game.revealResult.offDiff.toFixed(1)}° off</div>
+                {!isFreeplay && (
+                  <div className="mt-4 flex justify-center gap-4">
+                    <div className={`rounded-xl px-4 py-2 ${offenseTeamIdx === 0 ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-purple-500/10 border border-purple-500/20'}`}>
+                      <div className="text-xs text-gray-400">Offense</div>
+                      <div className={`text-lg font-bold ${offenseTeamIdx === 0 ? 'text-blue-400' : 'text-purple-400'}`}>{game.revealResult.offDiff.toFixed(1)}° off</div>
+                    </div>
+                    <div className={`rounded-xl px-4 py-2 ${defenseTeamIdx === 0 ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-purple-500/10 border border-purple-500/20'}`}>
+                      <div className="text-xs text-gray-400">Defense</div>
+                      <div className={`text-lg font-bold ${defenseTeamIdx === 0 ? 'text-blue-400' : 'text-purple-400'}`}>{game.revealResult.defDiff.toFixed(1)}° off</div>
+                    </div>
                   </div>
-                  <div className={`rounded-xl px-4 py-2 ${defenseTeamIdx === 0 ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-purple-500/10 border border-purple-500/20'}`}>
-                    <div className="text-xs text-gray-400">Defense</div>
-                    <div className={`text-lg font-bold ${defenseTeamIdx === 0 ? 'text-blue-400' : 'text-purple-400'}`}>{game.revealResult.defDiff.toFixed(1)}° off</div>
-                  </div>
-                </div>
+                )}
 
                 {game.phase === 'game-over' ? (
                   <div className="mt-4 text-xl font-bold text-yellow-400">Game Over!</div>
@@ -1115,8 +1244,10 @@ function GameOverScreen({ state, isHost, onPlayAgain }) {
 function App() {
   const {
     connected, roomState, targetAngle, error, roomCode, sessionId, myRole, isHost,
+    dialController,
     createRoom, joinRoom, joinTeam, leaveTeam, kickPlayer, updateTeamName,
     startGame, submitClue, updateNeedle, lockGuess, nextRound, playAgain,
+    grabDial, releaseDial, requestSync,
   } = useSocket();
 
   const [screen, setScreen] = useState('title'); // title, name-create, name-join
@@ -1131,11 +1262,18 @@ function App() {
     // We've joined, will render lobby/game below
   }
 
-  // Connection indicator
+  // Connection indicator + resync
   const ConnectionDot = () => (
-    <div className="fixed top-4 right-4 z-50 flex items-center gap-2 glass rounded-full px-3 py-1.5">
-      <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400 animate-pulse'}`} />
-      <span className="text-xs text-gray-400">{connected ? 'Connected' : 'Reconnecting...'}</span>
+    <div className="fixed top-4 right-4 z-50 flex items-center gap-2">
+      {inRoom && (
+        <button onClick={requestSync} className="glass rounded-full px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-white/10 transition-all">
+          Resync
+        </button>
+      )}
+      <div className="glass rounded-full px-3 py-1.5 flex items-center gap-2">
+        <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400 animate-pulse'}`} />
+        <span className="text-xs text-gray-400">{connected ? 'Connected' : 'Reconnecting...'}</span>
+      </div>
     </div>
   );
 
@@ -1198,10 +1336,13 @@ function App() {
           targetAngle={targetAngle}
           isHost={isHost}
           sessionId={sessionId}
+          dialController={dialController}
           onSubmitClue={submitClue}
           onUpdateNeedle={updateNeedle}
           onLockGuess={lockGuess}
           onNextRound={nextRound}
+          onGrabDial={grabDial}
+          onReleaseDial={releaseDial}
         />
       </>
     );
