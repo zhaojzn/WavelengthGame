@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, createContext, useContext } f
 import { io } from 'socket.io-client';
 import defaultCards from './spectrumCards';
 
+const APP_VERSION = 'v1.0.0';
 const POINTS_TO_WIN = 10;
 
 const DEFAULT_PRESETS_TEXT = defaultCards.map(([l, r]) => `${l} / ${r}`).join('\n');
@@ -249,6 +250,7 @@ function TitleScreen({ onCreateLobby, onJoinLobby }) {
           </div>
         </div>
       </div>
+      <div className="absolute bottom-4 text-xs text-gray-600">{APP_VERSION}</div>
     </div>
   );
 }
