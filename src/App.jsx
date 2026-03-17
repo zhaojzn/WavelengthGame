@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect, createContext, useContext } f
 import { io } from 'socket.io-client';
 import defaultCards from './spectrumCards';
 
-const APP_VERSION = 'v1.0.0';
+const APP_VERSION = 'v1.0.1';
 const POINTS_TO_WIN = 10;
 
 const DEFAULT_PRESETS_TEXT = defaultCards.map(([l, r]) => `${l} / ${r}`).join('\n');
@@ -89,18 +89,19 @@ function useSocket() {
       });
     });
 
-    // Periodic full-state sync to recover from dropped events
-    const syncInterval = setInterval(() => {
-      if (s.connected) {
-        s.emit('request-sync');
-      }
-    }, 3000);
-
-    return () => {
-      clearInterval(syncInterval);
-      s.disconnect();
-    };
+    return () => s.disconnect();
   }, []);
+
+  // Periodic full-state sync only when in a room (recovers from dropped events)
+  useEffect(() => {
+    if (!socket || !roomCode) return;
+    const syncInterval = setInterval(() => {
+      if (socket.connected) {
+        socket.emit('request-sync');
+      }
+    }, 10000);
+    return () => clearInterval(syncInterval);
+  }, [socket, roomCode]);
 
   const createRoom = useCallback((playerName) => {
     socket?.emit('create-room', { playerName, sessionId });
