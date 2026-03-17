@@ -1,0 +1,12 @@
+node_modules
+dist
+src
+public
+*.md
+.git
+.gitignore
+netlify.toml
+vite.config.js
+tailwind.config.js
+postcss.config.js
+eslint.config.js

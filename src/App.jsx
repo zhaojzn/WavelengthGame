@@ -1,7 +1,33 @@
 import { useState, useCallback, useRef, useEffect, createContext, useContext } from 'react';
 import { io } from 'socket.io-client';
+import defaultCards from './spectrumCards';
 
 const POINTS_TO_WIN = 10;
+
+const DEFAULT_PRESETS_TEXT = defaultCards.map(([l, r]) => `${l} / ${r}`).join('\n');
+
+function parsePresetsText(text) {
+  return text.split('\n')
+    .map(line => line.trim())
+    .filter(line => line.includes('/'))
+    .map(line => {
+      const [left, ...rest] = line.split('/');
+      return [left.trim(), rest.join('/').trim()];
+    })
+    .filter(([l, r]) => l && r);
+}
+
+function loadSavedPresets() {
+  try {
+    const saved = localStorage.getItem('wavelength-presets');
+    if (saved) return saved;
+  } catch {}
+  return DEFAULT_PRESETS_TEXT;
+}
+
+function savePresets(text) {
+  try { localStorage.setItem('wavelength-presets', text); } catch {}
+}
 
 function getPointsLabel(points) {
   if (points === 4) return "BULLSEYE!";
@@ -32,7 +58,8 @@ function useSocket() {
   const sessionId = useRef(getSessionId()).current;
 
   useEffect(() => {
-    const s = io({ transports: ['websocket', 'polling'] });
+    const serverUrl = import.meta.env.VITE_SERVER_URL || undefined;
+    const s = io(serverUrl, { transports: ['websocket', 'polling'] });
     setSocket(s);
 
     s.on('connect', () => setConnected(true));
@@ -61,7 +88,17 @@ function useSocket() {
       });
     });
 
-    return () => s.disconnect();
+    // Periodic full-state sync to recover from dropped events
+    const syncInterval = setInterval(() => {
+      if (s.connected) {
+        s.emit('request-sync');
+      }
+    }, 3000);
+
+    return () => {
+      clearInterval(syncInterval);
+      s.disconnect();
+    };
   }, []);
 
   const createRoom = useCallback((playerName) => {
@@ -88,8 +125,8 @@ function useSocket() {
     socket?.emit('update-team-name', { teamIndex, name });
   }, [socket]);
 
-  const startGame = useCallback(() => {
-    socket?.emit('start-game');
+  const startGame = useCallback((customCards) => {
+    socket?.emit('start-game', { customCards });
   }, [socket]);
 
   const submitClue = useCallback((clue) => {
@@ -288,6 +325,19 @@ function NameScreen({ mode, onSubmit, error }) {
 // ==================== LOBBY SCREEN ====================
 function LobbyScreen({ state, sessionId, isHost, error, onJoinTeam, onLeaveTeam, onKickPlayer, onUpdateTeamName, onStartGame }) {
   const [copied, setCopied] = useState(false);
+  const [presetsText, setPresetsText] = useState(loadSavedPresets);
+  const [showPresets, setShowPresets] = useState(false);
+  const parsedCards = parsePresetsText(presetsText);
+
+  const handlePresetsChange = (text) => {
+    setPresetsText(text);
+    savePresets(text);
+  };
+
+  const handleResetPresets = () => {
+    setPresetsText(DEFAULT_PRESETS_TEXT);
+    savePresets(DEFAULT_PRESETS_TEXT);
+  };
 
   const copyCode = () => {
     navigator.clipboard.writeText(state.code);
@@ -447,6 +497,47 @@ function LobbyScreen({ state, sessionId, isHost, error, onJoinTeam, onLeaveTeam,
           </div>
         </div>
 
+        {/* Spectrum Presets Editor (host only) */}
+        {isHost && (
+          <div className="glass rounded-xl mb-6 overflow-hidden">
+            <button
+              onClick={() => setShowPresets(!showPresets)}
+              className="w-full p-4 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+            >
+              <div>
+                <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Spectrum Cards</h3>
+                <p className="text-xs text-gray-500 mt-0.5">{parsedCards.length} cards loaded</p>
+              </div>
+              <svg className={`w-5 h-5 text-gray-400 transition-transform ${showPresets ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {showPresets && (
+              <div className="px-4 pb-4 border-t border-white/5 pt-3">
+                <p className="text-xs text-gray-500 mb-2">One per line, format: <span className="text-gray-400">Left / Right</span>. Saved to your browser automatically.</p>
+                <textarea
+                  value={presetsText}
+                  onChange={(e) => handlePresetsChange(e.target.value)}
+                  rows={12}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm font-mono placeholder-gray-500 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all resize-y leading-relaxed"
+                  placeholder="Hot / Cold&#10;Good / Evil&#10;..."
+                />
+                <div className="flex items-center justify-between mt-2">
+                  <span className={`text-xs ${parsedCards.length < 3 ? 'text-red-400' : 'text-gray-500'}`}>
+                    {parsedCards.length < 3 ? 'Need at least 3 valid cards' : `${parsedCards.length} cards ready`}
+                  </span>
+                  <button
+                    onClick={handleResetPresets}
+                    className="text-xs text-gray-500 hover:text-gray-300 transition-colors px-2 py-1 rounded hover:bg-white/5"
+                  >
+                    Reset to defaults
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {error && (
           <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center">
             {error}
@@ -456,8 +547,8 @@ function LobbyScreen({ state, sessionId, isHost, error, onJoinTeam, onLeaveTeam,
         {/* Start Button (host only) */}
         {isHost && (
           <button
-            onClick={onStartGame}
-            disabled={!canStart}
+            onClick={() => onStartGame(parsedCards.length >= 3 ? parsedCards : null)}
+            disabled={!canStart || parsedCards.length < 3}
             className="btn-primary w-full px-8 py-4 rounded-2xl text-lg font-semibold text-white relative disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <span className="relative z-10">Start Game</span>
@@ -640,8 +731,13 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
 
   // Find master name for offense
   const offenseMaster = state.players.find(p => p.teamIndex === offenseTeamIdx && p.isMaster);
+  const defenseMaster = state.players.find(p => p.teamIndex === defenseTeamIdx && p.isMaster);
   const offensePlayerNames = state.players.filter(p => p.teamIndex === offenseTeamIdx && !p.isMaster).map(p => p.name);
   const defensePlayerNames = state.players.filter(p => p.teamIndex === defenseTeamIdx && !p.isMaster).map(p => p.name);
+  const team0Master = state.players.find(p => p.teamIndex === 0 && p.isMaster);
+  const team0Players = state.players.filter(p => p.teamIndex === 0 && !p.isMaster).map(p => p.name);
+  const team1Master = state.players.find(p => p.teamIndex === 1 && p.isMaster);
+  const team1Players = state.players.filter(p => p.teamIndex === 1 && !p.isMaster).map(p => p.name);
 
   // Can I interact with the dial?
   const canDrag = (game.phase === 'offense-guess' && myRole === 'offense-player') ||
@@ -671,12 +767,14 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
     }
   }, [game.phase, game.revealResult]);
 
+  const latestAngle = useRef(90);
   const handleNeedleChange = (angle) => {
     setLocalAngle(angle);
-    // Throttle network updates
+    latestAngle.current = angle;
+    // Throttle network updates — always send latest angle when throttle fires
     if (!throttle.current) {
       throttle.current = setTimeout(() => {
-        onUpdateNeedle(angle);
+        onUpdateNeedle(latestAngle.current);
         throttle.current = null;
       }, 50);
     }
@@ -740,6 +838,32 @@ function GameScreen({ state, myRole, targetAngle, isHost, sessionId, onSubmitClu
           </div>
         </div>
       </header>
+
+      {/* Team rosters */}
+      <div className="max-w-4xl mx-auto w-full px-4 pt-2 flex justify-between">
+        <div className="flex flex-col gap-0.5 max-w-[40%]">
+          {team0Master && (
+            <div className="text-xs text-blue-300 font-semibold flex items-center gap-1">
+              <span className="text-[10px] bg-blue-500/20 text-blue-300 px-1 py-0.5 rounded">M</span>
+              {team0Master.name}
+            </div>
+          )}
+          {team0Players.map(name => (
+            <div key={name} className="text-xs text-blue-400/70 pl-4 truncate">{name}</div>
+          ))}
+        </div>
+        <div className="flex flex-col gap-0.5 items-end max-w-[40%]">
+          {team1Master && (
+            <div className="text-xs text-purple-300 font-semibold flex items-center gap-1">
+              {team1Master.name}
+              <span className="text-[10px] bg-purple-500/20 text-purple-300 px-1 py-0.5 rounded">M</span>
+            </div>
+          )}
+          {team1Players.map(name => (
+            <div key={name} className="text-xs text-purple-400/70 pr-4 truncate">{name}</div>
+          ))}
+        </div>
+      </div>
 
       {/* Your role badge */}
       <div className="flex justify-center pt-3 gap-2">

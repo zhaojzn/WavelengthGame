@@ -286,7 +286,7 @@ io.on('connection', (socket) => {
     io.to(myRoomCode).emit('room-state', getRoomState(room));
   });
 
-  socket.on('start-game', () => {
+  socket.on('start-game', ({ customCards } = {}) => {
     if (!myRoomCode || !mySessionId) return;
     const room = rooms.get(myRoomCode);
     if (!room || room.hostId !== mySessionId) return;
@@ -312,7 +312,7 @@ io.on('connection', (socket) => {
     // Initialize game
     room.game = {
       phase: 'master-peek',
-      cards: shuffle(spectrumCards),
+      cards: shuffle(customCards && customCards.length >= 3 ? customCards : spectrumCards),
       cardIndex: 0,
       targetAngle: randomTarget(),
       offenseTeamIdx: 0,
@@ -354,11 +354,11 @@ io.on('connection', (socket) => {
     // Only non-master players can move the needle
     if (room.game.phase === 'offense-guess' && role === 'offense-player') {
       room.game.offenseAngle = angle;
-      // Broadcast to room for live sync
-      socket.to(myRoomCode).emit('needle-update', { team: 'offense', angle });
+      // Broadcast to entire room (including sender for confirmation)
+      io.to(myRoomCode).emit('needle-update', { team: 'offense', angle });
     } else if (room.game.phase === 'defense-guess' && role === 'defense-player') {
       room.game.defenseAngle = angle;
-      socket.to(myRoomCode).emit('needle-update', { team: 'defense', angle });
+      io.to(myRoomCode).emit('needle-update', { team: 'defense', angle });
     }
   });
 
@@ -438,6 +438,14 @@ io.on('connection', (socket) => {
 
     room.game = null;
     io.to(myRoomCode).emit('room-state', getRoomState(room));
+  });
+
+  // Allow clients to request a full state sync
+  socket.on('request-sync', () => {
+    if (!myRoomCode) return;
+    const room = rooms.get(myRoomCode);
+    if (!room) return;
+    socket.emit('room-state', getRoomState(room));
   });
 
   socket.on('disconnect', () => {
